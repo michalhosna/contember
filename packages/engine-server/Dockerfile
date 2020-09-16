@@ -10,6 +10,8 @@ RUN yarn install
 FROM node:12-alpine
 
 WORKDIR /src
+RUN apk --no-cache add curl
+
 COPY --from=builder /src/ /src
 
 ENV NODE_ENV "production"
