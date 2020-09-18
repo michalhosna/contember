@@ -14,6 +14,11 @@ export enum MutationResultType {
 	sqlError = 'sqlError',
 }
 
+export enum MutationResultHint {
+	sqlError = 'sqlError',
+	subSequentSqlError = 'subsequentSqlError',
+}
+
 export enum ModificationType {
 	create = 'create',
 	update = 'update',
@@ -41,12 +46,15 @@ interface MutationResultInterface {
 	result: MutationResultType
 	path: Path
 	message?: string
+	hints: MutationResultHint[]
 }
 
 export type RowValues = { [fieldName: string]: Value.AtomicValue }
+
 export class MutationUpdateOk implements MutationResultInterface {
 	result = MutationResultType.ok as const
 	type = ModificationType.update as const
+	hints: MutationResultHint[] = []
 
 	constructor(
 		public readonly path: Path,
@@ -60,6 +68,7 @@ export class MutationUpdateOk implements MutationResultInterface {
 export class MutationCreateOk implements MutationResultInterface {
 	result = MutationResultType.ok as const
 	type = ModificationType.create as const
+	hints: MutationResultHint[] = []
 
 	constructor(
 		public readonly path: Path,
@@ -73,6 +82,7 @@ export class MutationCreateOk implements MutationResultInterface {
 export class MutationDeleteOk implements MutationResultInterface {
 	result = MutationResultType.ok as const
 	type = ModificationType.delete as const
+	hints: MutationResultHint[] = []
 
 	constructor(
 		public readonly path: Path,
@@ -84,6 +94,7 @@ export class MutationDeleteOk implements MutationResultInterface {
 export class MutationJunctionUpdateOk implements MutationResultInterface {
 	result = MutationResultType.ok as const
 	type = ModificationType.junctionUpdate as const
+	hints: MutationResultHint[] = []
 
 	constructor(
 		public readonly path: Path,
@@ -104,6 +115,7 @@ export enum NothingToDoReason {
 
 export class MutationNothingToDo implements MutationResultInterface {
 	result = MutationResultType.nothingToDo as const
+	hints: MutationResultHint[] = []
 
 	constructor(public readonly path: Path, public readonly reason: NothingToDoReason) {}
 }
@@ -116,13 +128,22 @@ export enum InputErrorKind {
 export class MutationInputError implements MutationResultInterface {
 	result = MutationResultType.inputError as const
 
-	constructor(public readonly path: Path, public readonly kind: InputErrorKind, public readonly message?: string) {}
+	constructor(
+		public readonly path: Path,
+		public readonly kind: InputErrorKind,
+		public readonly message?: string,
+		public readonly hints: MutationResultHint[] = [],
+	) {}
 }
 
 export class MutationSqlError implements MutationResultInterface {
 	result = MutationResultType.sqlError as const
 
-	constructor(public readonly path: Path, public readonly message?: string) {}
+	constructor(
+		public readonly path: Path,
+		public readonly message?: string,
+		public readonly hints: MutationResultHint[] = [],
+	) {}
 }
 
 export enum ConstraintType {
@@ -138,12 +159,14 @@ export class MutationConstraintViolationError implements MutationResultInterface
 		public readonly path: Path,
 		public readonly constraint: ConstraintType,
 		public readonly message?: string,
+		public readonly hints: MutationResultHint[] = [],
 	) {}
 }
 
 // maybe denied by acl
 export class MutationEntryNotFoundError implements MutationResultInterface {
 	result = MutationResultType.notFoundError as const
+	hints: MutationResultHint[] = []
 
 	constructor(public readonly path: Path, public readonly where: Input.UniqueWhere) {}
 }
@@ -151,6 +174,7 @@ export class MutationEntryNotFoundError implements MutationResultInterface {
 // possibly denied by acl
 export class MutationNoResultError implements MutationResultInterface {
 	result = MutationResultType.noResultError as const
+	hints: MutationResultHint[] = []
 
 	constructor(public readonly path: Path) {}
 }
@@ -178,16 +202,13 @@ export type ResultListNotFlatten = MutationResultList | MutationResultList[]
 export const collectResults = async (
 	promises: (Promise<ResultListNotFlatten | undefined> | undefined)[],
 ): Promise<MutationResultList> => {
-	const allPromises: Promise<ResultListNotFlatten>[] = promises
+	let index = 0
+	const allPromises: Promise<{ index: number; value: ResultListNotFlatten }>[] = promises
 		.filter((it): it is Promise<ResultListNotFlatten> => !!it)
 		.map(it =>
-			it.catch(e => {
-				const converted = convertError(e)
-				if (!converted) {
-					throw e
-				}
-				return [converted]
-			}),
+			it //
+				.catch(e => [convertError(e)])
+				.then(value => ({ value, index: index++ })),
 		)
 	const results = await Promise.allSettled(allPromises)
 	const failures = getRejections(results)
@@ -202,5 +223,8 @@ export const collectResults = async (
 	}
 
 	const values = getFulfilledValues(results)
+		.sort((a, b) => a.index - b.index)
+		.map(it => it.value)
+
 	return flattenResult(values.filter((it): it is MutationResultList | MutationResultList[] => !!it))
 }

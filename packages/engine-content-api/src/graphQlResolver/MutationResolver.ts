@@ -7,7 +7,14 @@ import { ImplementationException } from '../exception'
 import { Client, Connection, SerializationFailureError } from '@contember/database'
 import { Operation, readOperationMeta } from '../graphQLSchema/OperationExtension'
 import { assertNever } from '../utils'
-import { ConstraintType, getInsertPrimary, InputErrorKind, MutationResultList, MutationResultType } from '../sql/Result'
+import {
+	ConstraintType,
+	getInsertPrimary,
+	InputErrorKind,
+	MutationResultHint,
+	MutationResultList,
+	MutationResultType,
+} from '../sql/Result'
 import { InputPreValidator } from '../input-validation/preValidation/InputPreValidator'
 import { ObjectNode } from '../inputProcessing'
 
@@ -370,56 +377,68 @@ export default class MutationResolver {
 	}
 
 	private convertResultToErrors(result: MutationResultList): Result.ExecutionError[] {
-		return result
-			.filter(
-				it =>
-					![MutationResultType.ok, MutationResultType.nothingToDo, MutationResultType.validationError].includes(
-						it.result,
-					),
-			)
-			.map(it => {
-				const path = it.path.map(it => ({
-					...it,
-					__typename: 'field' in it ? '_FieldPathFragment' : '_IndexPathFragment',
-				}))
-				switch (it.result) {
-					case MutationResultType.constraintViolationError:
-						switch (it.constraint) {
-							case ConstraintType.notNull:
-								return { path: path, type: Result.ExecutionErrorType.NotNullConstraintViolation, message: it.message }
-							case ConstraintType.foreignKey:
-								return {
-									path: path,
-									type: Result.ExecutionErrorType.ForeignKeyConstraintViolation,
-									message: it.message,
-								}
-							case ConstraintType.uniqueKey:
-								return { path: path, type: Result.ExecutionErrorType.UniqueConstraintViolation, message: it.message }
-							default:
-								return assertNever(it.constraint)
-						}
-					case MutationResultType.noResultError:
-					case MutationResultType.notFoundError:
-						return { path: path, type: Result.ExecutionErrorType.NotFoundOrDenied }
-					case MutationResultType.inputError:
-						switch (it.kind) {
-							case InputErrorKind.nonUniqueWhere:
-								return { path: path, type: Result.ExecutionErrorType.NonUniqueWhereInput, message: it.message }
-							case InputErrorKind.invalidData:
-								return { path: path, type: Result.ExecutionErrorType.InvalidDataInput, message: it.message }
-							default:
-								return assertNever(it.kind)
-						}
+		const errors = result.filter(
+			it =>
+				![MutationResultType.ok, MutationResultType.nothingToDo, MutationResultType.validationError].includes(
+					it.result,
+				),
+		)
 
-					case MutationResultType.sqlError:
-						return { path, type: Result.ExecutionErrorType.SqlError, message: it.message }
-					case MutationResultType.ok:
-					case MutationResultType.nothingToDo:
-						throw new ImplementationException('MutationResolver: unexpected MutationResultType')
-					default:
-						return assertNever(it)
-				}
-			})
+		let hasSqlError = false
+		const filteredErrors: MutationResultList = []
+		for (const error of errors) {
+			if (error.hints.includes(MutationResultHint.subSequentSqlError) && hasSqlError) {
+				continue
+			}
+			if (error.hints.includes(MutationResultHint.sqlError)) {
+				hasSqlError = true
+			}
+			filteredErrors.push(error)
+		}
+
+		return filteredErrors.map(it => {
+			const path = it.path.map(it => ({
+				...it,
+				__typename: 'field' in it ? '_FieldPathFragment' : '_IndexPathFragment',
+			}))
+			switch (it.result) {
+				case MutationResultType.constraintViolationError:
+					switch (it.constraint) {
+						case ConstraintType.notNull:
+							return { path: path, type: Result.ExecutionErrorType.NotNullConstraintViolation, message: it.message }
+						case ConstraintType.foreignKey:
+							return {
+								path: path,
+								type: Result.ExecutionErrorType.ForeignKeyConstraintViolation,
+								message: it.message,
+							}
+						case ConstraintType.uniqueKey:
+							return { path: path, type: Result.ExecutionErrorType.UniqueConstraintViolation, message: it.message }
+						default:
+							return assertNever(it.constraint)
+					}
+				case MutationResultType.noResultError:
+				case MutationResultType.notFoundError:
+					return { path: path, type: Result.ExecutionErrorType.NotFoundOrDenied }
+				case MutationResultType.inputError:
+					switch (it.kind) {
+						case InputErrorKind.nonUniqueWhere:
+							return { path: path, type: Result.ExecutionErrorType.NonUniqueWhereInput, message: it.message }
+						case InputErrorKind.invalidData:
+							return { path: path, type: Result.ExecutionErrorType.InvalidDataInput, message: it.message }
+						default:
+							return assertNever(it.kind)
+					}
+
+				case MutationResultType.sqlError:
+					return { path, type: Result.ExecutionErrorType.SqlError, message: it.message }
+				case MutationResultType.ok:
+				case MutationResultType.nothingToDo:
+					throw new ImplementationException('MutationResolver: unexpected MutationResultType')
+				default:
+					return assertNever(it)
+			}
+		})
 	}
 
 	private stringifyValidationErrors(validationErrors: Result.ValidationError[]): string | undefined {
@@ -451,7 +470,7 @@ export default class MutationResolver {
 				if ('field' in it) {
 					return it.field
 				}
-				if ('alias' in it) {
+				if ('alias' in it && it.alias) {
 					return `${it.index}(${it.alias})`
 				}
 				return it.index
