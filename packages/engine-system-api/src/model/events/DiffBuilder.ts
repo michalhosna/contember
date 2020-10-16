@@ -1,4 +1,4 @@
-import { DependencyBuilder } from './DependencyBuilder'
+import { DependencyBuilder, EventsDependencies } from './DependencyBuilder'
 import { Stage } from '../dtos'
 import { ContentEvent } from '@contember/engine-common'
 import { DiffCountQuery, DiffQuery } from '../queries'
@@ -10,6 +10,7 @@ import { Acl, Schema } from '@contember/schema'
 import { formatSchemaName } from '../helpers'
 import { filterSchemaByStage } from '@contember/schema-utils'
 import { Identity } from '../authorization'
+import { emptyImmutableSet, ImmutableSet } from '../../utils/set'
 
 export type EventsPermissionsVerifierContext = {
 	variables: Acl.VariablesMap
@@ -55,31 +56,31 @@ export class DiffBuilder {
 		assertEveryIsContentEvent(events)
 		const schema = await this.schemaVersionBuilder.buildSchema(db)
 		const dependencies = await this.dependencyBuilder.build(schema, events)
-		const eventsWithDependencies = events.map(it => ({
-			...it,
-			dependencies: dependencies[it.id] || [],
-		}))
 
 		const filteredEvents =
 			filter !== null
-				? await this.filterEvents(eventsWithDependencies, permissionContext, db, schema, baseStage, headStage, filter)
-				: eventsWithDependencies
+				? await this.filterEvents(events, dependencies, permissionContext, db, schema, baseStage, headStage, filter)
+				: events
 
 		return {
 			ok: true,
-			events: filteredEvents,
+			events: filteredEvents.map(it => ({
+				...it,
+				dependencies: dependencies.get(it.id) || emptyImmutableSet,
+			})),
 		}
 	}
 
 	private async filterEvents(
-		events: EventWithDependencies[],
+		events: ContentEvent[],
+		eventDependencies: EventsDependencies,
 		permissionContext: EventsPermissionsVerifierContext,
 		db: DatabaseContext,
 		schema: Schema,
 		baseStage: Stage,
 		headStage: Stage,
 		filter: ReadonlyArray<EventFilter>,
-	): Promise<EventWithDependencies[]> {
+	): Promise<ContentEvent[]> {
 		if (filter.length === 0) {
 			return []
 		}
@@ -89,20 +90,20 @@ export class DiffBuilder {
 
 		const rootEvents: ContentEvent[] = events.filter(it => it.rowId.some(id => allIds.includes(id)))
 		const eventIds = new Set<string>([])
-		const dependenciesMap: { [id: string]: string[] } = events.reduce(
-			(acc, event) => ({ ...acc, [event.id]: event.dependencies }),
-			{},
-		)
-		const collectDependencies = (ids: string[]) => {
+
+		const collectDependencies = (ids: ImmutableSet<string>) => {
 			ids.forEach(id => {
 				if (eventIds.has(id)) {
 					return
 				}
 				eventIds.add(id)
-				collectDependencies(dependenciesMap[id] || [])
+				const deps = eventDependencies.get(id)
+				if (deps) {
+					collectDependencies(deps)
+				}
 			})
 		}
-		const rootEventIds = rootEvents.map(it => it.id)
+		const rootEventIds = new Set(rootEvents.map(it => it.id))
 		collectDependencies(rootEventIds)
 
 		return events.filter(it => eventIds.has(it.id))
@@ -160,7 +161,7 @@ export class DiffBuilderErrorResponse {
 	constructor(public readonly errors: DiffBuilderErrorCode[]) {}
 }
 
-export type EventWithDependencies = ContentEvent & { dependencies: string[] }
+export type EventWithDependencies = ContentEvent & { dependencies: ImmutableSet<string> }
 
 export class DiffBuilderOkResponse {
 	public readonly ok: true = true
